@@ -2,6 +2,7 @@
 // Build: g++ -std=c++17 -O2 -I../include render_demos.cpp -o render_demos
 // Run:   ./render_demos <output-dir>
 #include "KhFilters.h"
+#include "AvaruusradioFilter.h"
 #include <cstdio>
 #include <cstdint>
 #include <vector>
@@ -95,6 +96,21 @@ static Buf percussion(Proc p, double seconds = 6.0)
     return out;
 }
 
+// Buzzy "vocal cords": saw with slow random intonation and a little vibrato.
+static Buf buzz(std::function<float(float, double)> p, double seconds, double baseHz = 110.0, uint32_t seed = 5)
+{
+    std::mt19937 rng(seed); std::uniform_real_distribution<double> U(-1, 1);
+    Saw saw; Buf out; double pitch = 0, target = 0;
+    for (int i = 0; i < (int)(seconds * FS); ++i) {
+        double t = i / FS;
+        if (i % 9000 == 0) target = 3.0 * U(rng);
+        pitch += (target - pitch) * 0.0003;
+        saw.setFreq(baseHz * std::pow(2.0, (pitch + 0.15 * std::sin(2 * kh::kPi * 5.2 * t)) / 12.0));
+        out.push_back(p((float)(0.5 * saw.next()), t));
+    }
+    return out;
+}
+
 int main(int argc, char** argv)
 {
     const std::string dir = argc > 1 ? std::string(argv[1]) + "/" : "./";
@@ -154,5 +170,33 @@ int main(int argc, char** argv)
     }
     writeWav(dir + "v06_pad.wav",           pad(vil(0.7, 0.4)));
     writeWav(dir + "v07_percussion.wav",    percussion(vil(0.97, 0.5)));
+    // Avaruusradio (formant / mumble / bad radio)
+    auto ar = [](double babble, double radioAmt, double rate, uint32_t seed) {
+        auto f = std::make_shared<kh::AvaruusradioFilter>(); f->prepare(FS); f->setSeed(seed);
+        f->setBabble(babble); f->setRadio(radioAmt); f->setRate(rate); f->setSharpness(0.6);
+        return f;
+    };
+    {   // manual vowel sweep a -> u and back, no babble
+        auto f = ar(0.0, 0.0, 5, 1);
+        writeWav(dir + "r01_vowel_sweep.wav", buzz([&](float x, double t) {
+            f->setVowel(0.5 - 0.5 * std::cos(2 * kh::kPi * t / 8.0)); return f->process(x); }, 8.0));
+    }
+    { auto f = ar(0.6, 0.0, 5, 2);  writeWav(dir + "r02_mumble.wav",            buzz([&](float x, double) { return f->process(x); }, 10.0)); }
+    { auto f = ar(1.0, 0.0, 9, 3);  writeWav(dir + "r03_fast_chatter.wav",      buzz([&](float x, double) { return f->process(x); }, 10.0, 140.0)); }
+    { auto f = ar(0.8, 0.5, 5, 4);  writeWav(dir + "r04_mumble_radio_half.wav", buzz([&](float x, double) { return f->process(x); }, 10.0)); }
+    { auto f = ar(0.85, 1.0, 4.5, 5); writeWav(dir + "r05_distant_station.wav", buzz([&](float x, double) { return f->process(x); }, 12.0, 95.0)); }
+    {   // radio knob ramps 0 -> 1 while it keeps talking
+        auto f = ar(0.8, 0.0, 5, 6);
+        writeWav(dir + "r06_radio_ramp.wav", buzz([&](float x, double t) {
+            if (((int)(t * FS) & 63) == 0) { f->setRadio(t / 12.0); } return f->process(x); }, 12.0));
+    }
+    { auto f = ar(0.7, 0.3, 145.0 / 60.0 * 2, 7);
+      writeWav(dir + "r07_talking_bassline.wav", goaBass([&](float x, double, double) { return f->process(x * 1.5f); }, 8.0)); }
+    { auto f = ar(0.6, 0.7, 3, 8);  writeWav(dir + "r08_pad_radio.wav", pad([&](float x, double, double) { return f->process(x * 2.f); }, 10.0)); }
+    {   // noise source: whispering station
+        auto f = ar(0.9, 0.8, 6, 9); std::mt19937 rng(11); std::uniform_real_distribution<double> U(-1, 1);
+        Buf b; for (int i = 0; i < (int)(10 * FS); ++i) b.push_back(f->process((float)(0.4 * U(rng))));
+        writeWav(dir + "r09_whisper_station.wav", b);
+    }
     return 0;
 }
