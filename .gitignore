@@ -1,0 +1,5 @@
+build/
+*.wav
+render_demos
+stability_test
+*.exe
