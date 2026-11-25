@@ -129,7 +129,11 @@ public:
 
     void setVowel(double v)     { vowel = std::clamp(v, 0.0, 1.0); }
     void setBabble(double b)    { babble = std::clamp(b, 0.0, 1.0); }
-    void setRadio(double r)     { radio = std::clamp(r, 0.0, 1.0); updateRadioFilters(); }
+    void setRadio(double r)
+    {
+        r = std::clamp(r, 0.0, 1.0);
+        if (r != radio) { radio = r; updateRadioFilters(); }
+    }
     void setRate(double hz)     { rate = std::clamp(hz, 0.5, 20.0); }
     void setSharpness(double s) { sharp = std::clamp(s, 0.0, 1.0); }
     void setSeed(uint32_t s)    { seed = s; rng.seed(s); }
@@ -213,7 +217,7 @@ public:
         // 5) static: hiss + crackle
         const double hiss = rng.bi() * 0.02 * radio;
         double crackle = 0.0;
-        if (rng.uni() < radio * radio * 0.0015) crackle = rng.bi() * 0.6 * radio;
+        if (rng.uni() < radio * radio * 0.0015 * 48000.0 / fs) crackle = rng.bi() * 0.6 * radio;
         crackle = crackleLp.tick(crackle) * 3.0 + crackle * 0.3;
         // 6) heterodyne whistle, gliding slowly
         const double wf = whistleSmooth.tick(whistleTarget);

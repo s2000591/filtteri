@@ -50,6 +50,11 @@ radio.setSeed(42);       // eri "puhuja"
 float y = radio.process(x); // syötä jotain surisevaa: saha, pulssi, kohina
 ```
 
+Jos isäntäkoodi pyörii jo ylinäytteistettynä (esim. Kulmahiomakone 4x), ohita
+suotimien oma ylinäytteistys: `kat.prepare(fs, false)` / `vil.prepare(fs, false)`.
+Silloin viivettä ei ole. `set(cutoff, reso, drive)` päivittää kaiken yhdellä
+kerroinlaskulla.
+
 Setterit laskevat kertoimet (sisältää `tan`-kutsuja), joten kutsu niitä
 blokin välein tai esim. joka 16. näyte, ja silota parametrit itse.
 Yksi instanssi per ääni (polyfonisessa syntikassa).

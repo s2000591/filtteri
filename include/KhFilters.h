@@ -18,6 +18,9 @@
 //
 // Both run 2x oversampled internally (halfband FIR). Latency is reported
 // by latencySamples(). Call setters per block (or smoothed per sample).
+// prepare(sampleRate, false) skips the internal oversampling (zero latency):
+// use it when the host code already runs at an oversampled rate.
+// set(cutoff, resonance, drive/gain) updates all at once (one coefficient pass).
 
 #pragma once
 #include <array>
@@ -107,21 +110,33 @@ class KatkarapuFilter
 public:
     struct Out { float lp, bp, hp; };
 
-    void prepare(double sampleRate)
+    void prepare(double sampleRate, bool oversample = true)
     {
-        fs2 = 2.0 * sampleRate;
+        os = oversample;
+        fs2 = (os ? 2.0 : 1.0) * sampleRate;
         for (auto* d : { &dcLp, &dcBp, &dcHp }) d->prepare(sampleRate);
         reset(); updateCoeffs();
     }
     void reset() { s1 = s2 = 0.0; osLp.reset(); osBp.reset(); osHp.reset(); osIn.reset(); }
-    int  latencySamples() const { return Oversampler2x::latency(); }
+    int  latencySamples() const { return os ? Oversampler2x::latency() : 0; }
 
     void setCutoff(double hz)    { cutoff = hz;  updateCoeffs(); }
     void setResonance(double r)  { res = std::clamp(r, 0.0, 1.0); updateCoeffs(); }
     void setDrive(double d)      { drive = std::clamp(d, 0.0, 1.0); updateCoeffs(); }
+    void set(double hz, double r, double d)
+    {
+        cutoff = hz; res = std::clamp(r, 0.0, 1.0); drive = std::clamp(d, 0.0, 1.0);
+        updateCoeffs();
+    }
 
     Out process(float in)
     {
+        if (!os)
+        {
+            double lp, bp, hp;
+            tick(in, lp, bp, hp);
+            return { (float)dcLp.process(lp), (float)dcBp.process(bp), (float)dcHp.process(hp) };
+        }
         double a, b;
         osIn.upsample(in, a, b);
         double lpA, bpA, hpA, lpB, bpB, hpB;
@@ -133,6 +148,7 @@ public:
     }
 
 private:
+    bool os = true;
     double fs2 = 96000.0, cutoff = 1000.0, res = 0.3, drive = 0.2;
     double g = 0.0, k = 2.0, lim = 3.0, fold = 0.0, bias = 0.0, inGain = 1.0;
     double s1 = 0.0, s2 = 0.0;
@@ -191,17 +207,28 @@ private:
 class VillapaitaFilter
 {
 public:
-    void prepare(double sampleRate) { fs2 = 2.0 * sampleRate; dc.prepare(sampleRate); reset(); updateCoeffs(); }
+    void prepare(double sampleRate, bool oversample = true)
+    {
+        os = oversample;
+        fs2 = (os ? 2.0 : 1.0) * sampleRate;
+        dc.prepare(sampleRate); reset(); updateCoeffs();
+    }
     void reset() { s.fill(0.0); osIn.reset(); osOut.reset(); }
-    int  latencySamples() const { return Oversampler2x::latency(); }
+    int  latencySamples() const { return os ? Oversampler2x::latency() : 0; }
 
     void setCutoff(double hz)     { cutoff = hz; updateCoeffs(); }
     void setResonance(double r)   { res = std::clamp(r, 0.0, 1.0); updateCoeffs(); }
     // 0 = attenuated & polite, ~0.5 = unity, 1 = hot & biting
     void setInputGain(double g01) { gain01 = std::clamp(g01, 0.0, 1.0); updateCoeffs(); }
+    void set(double hz, double r, double g01)
+    {
+        cutoff = hz; res = std::clamp(r, 0.0, 1.0); gain01 = std::clamp(g01, 0.0, 1.0);
+        updateCoeffs();
+    }
 
     float process(float in)
     {
+        if (!os) return (float)dc.process(tick(in));
         double a, b;
         osIn.upsample(in, a, b);
         const double ya = tick(a);
@@ -210,6 +237,7 @@ public:
     }
 
 private:
+    bool os = true;
     double fs2 = 96000.0, cutoff = 1000.0, res = 0.3, gain01 = 0.5;
     double k = 0.0, inGain = 1.0, outGain = 1.0;
     std::array<double, 4> G{}, s{};
