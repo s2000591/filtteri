@@ -5,8 +5,8 @@ Header-only C++17, ei JUCE-riippuvuutta: `include/`.
 
 | Luokka | Esikuva | Luonne |
 |---|---|---|
-| `kh::KatkarapuFilter` | Crazy Chicken **Shrimpy** | Multimode SVF (LP/BP/HP yhtä aikaa), resonanssi painottuu keskitaajuuksille, särö suodattimen *sisällä*; Driven yläpäässä taittuva, rahiseva reuna |
-| `kh::VillapaitaFilter` | Dwyfor Tech **Pas-Isel** | 4-napainen alipäästö, jokaisella navalla oma diodimainen epälineaarisuus ja pieni virityspoikkeama, soft-clip-diodit resonanssisilmukassa (Korg MS -tyyliin); pieni tulovahvistus = siisti, iso = pureva |
+| `kh::KatkarapuFilter` | Crazy Chicken **Shrimpy** | Multimode SVF (LP/BP/HP yhtä aikaa), resonanssi painottuu kevyesti keskitaajuuksille ja itseoskilloi koko alueella, särö suodattimen *sisällä*; Driven yläpäässä (yli ~0.4) taittuva, rahiseva reuna |
+| `kh::VillapaitaFilter` | Dwyfor Tech **Pas-Isel** | 4-napainen alipäästö, jokaisella navalla oma diodimainen epälineaarisuus ja pieni virityspoikkeama, soft-clip-diodit resonanssisilmukassa (Korg MS -tyyliin); pieni tulovahvistus = siisti, iso = pureva (herää noin 0.75:stä). Basso säilyy resonanssin alla ja resonanssi laulaa myös täydellä vahvistuksella |
 | `kh::AvaruusradioFilter` | "Avaruusradio" (Paratek, Oxymoron) | Formanttisuodatin (suomen vokaalit a–ä–e–i–y–ö–o–u), satunnainen tavu-/sanagenerointi "mutinaksi" ja huonosti kuuluva radio: SSB-virityksen ryömintä, kaistanrajaus, häipymät, rätinä, vihellys |
 
 `AvaruusradioFilter` on omassa headerissaan: `include/AvaruusradioFilter.h`.
@@ -24,14 +24,14 @@ Molemmat ajetaan sisäisesti 2× ylinäytteistettynä. Viive: `latencySamples()`
 kh::KatkarapuFilter kat;
 kat.prepare(sampleRate);
 kat.setCutoff(800.0);    // Hz
-kat.setResonance(0.8);   // 0..1 (itseoskilloi keskitaajuuksilla)
-kat.setDrive(0.5);       // 0..1 (yli ~0.6 alkaa taittuminen)
+kat.setResonance(0.8);   // 0..1 (itseoskilloi lähellä maksimia)
+kat.setDrive(0.5);       // 0..1 (yli ~0.4 alkaa taittuminen)
 auto o = kat.process(x); // o.lp, o.bp, o.hp
 
 kh::VillapaitaFilter vil;
 vil.prepare(sampleRate);
 vil.setCutoff(800.0);
-vil.setResonance(0.8);   // 0..1 (~0.95+ itseoskilloi)
+vil.setResonance(0.8);   // 0..1 (~0.7+ itseoskilloi)
 vil.setInputGain(0.5);   // 0 = kohtelias, 0.5 ≈ yksikkövahvistus, 1 = pureva
 float y = vil.process(x);
 ```
@@ -58,6 +58,21 @@ kerroinlaskulla.
 Setterit laskevat kertoimet (sisältää `tan`-kutsuja), joten kutsu niitä
 blokin välein tai esim. joka 16. näyte, ja silota parametrit itse.
 Yksi instanssi per ääni (polyfonisessa syntikassa).
+
+## Muutokset 26.11.2026 (Kulmahiomakoneen kanssa yhteiset)
+
+Mitattu ja viritetty Kulmahiomakoneessa (kohina- ja sahatestit, Pas-Isel-demovideon ääni):
+
+- **Katkarapu:** resonanssi hukkui sisäiseen säröön, kun tulo oli kuuma. Nyt säröraja kasvaa
+  resonanssin mukana ja tuloa lasketaan resonanssin noustessa, joten resonanssi soi
+  (piikki 900 Hz:ssä reso 1:llä noin 4 dB → noin 19 dB). Leveämpi resonanssialue (reunoilla 80 %),
+  vahvempi itseoskillointi, taittuminen alkaa Drivesta 0.4, kevyempi tasokompensaatio
+  (Drive kuuluu luonteena, ei tason pudotuksena), pehmeä katto lähdöissä (~±3).
+- **Villapaita:** resonanssi max 4.25 → 6.5, takaisinkytkennän diodien kynnys seuraa
+  tulovahvistusta ja suurella resolla + vahvistuksella tuloa hellitetään, joten resonanssi ei
+  tukehdu kuumaan tuloon (100/100: resonanssi noin −3 dB basson perustaajuudesta, ennen −23 dB).
+  Basso palautetaan rinnakkain, joten se säilyy resonanssin alla kuten oikeassa modulissa.
+- Näytteet `k*` ja `v*` renderöity uudelleen.
 
 ## Ääninäytteet (`samples/`)
 

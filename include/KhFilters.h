@@ -150,7 +150,7 @@ public:
 private:
     bool os = true;
     double fs2 = 96000.0, cutoff = 1000.0, res = 0.3, drive = 0.2;
-    double g = 0.0, k = 2.0, lim = 3.0, fold = 0.0, bias = 0.0, inGain = 1.0;
+    double g = 0.0, k = 2.0, lim = 3.0, fold = 0.0, bias = 0.0, inGain = 1.0, outComp = 1.0;
     double s1 = 0.0, s2 = 0.0;
     Oversampler2x osIn, osLp, osBp, osHp;
     DcBlock dcLp, dcBp, dcHp;
@@ -161,18 +161,31 @@ private:
         g = std::tan(kPi * fc / fs2);
 
         // Resonance voiced toward the midrange: full strength around ~900 Hz,
-        // tapering off toward the lows and highs (log-frequency bell).
+        // tapering gently toward the lows and highs (log-frequency bell; the
+        // edges keep 80 % so the filter still sings at both ends).
+        // (Kulmahiomakone 26.11.2026: wider bell, stronger self-oscillation.)
         const double oct = std::log2(fc / 900.0);
-        const double voice = 0.5 + 0.5 * std::exp(-(oct * oct) / (2.0 * 1.7 * 1.7));
+        const double voice = 0.8 + 0.2 * std::exp(-(oct * oct) / (2.0 * 2.0 * 2.0));
         const double r = res * voice;
-        k = std::max(-0.08, 2.0 * (1.0 - 1.03 * r)); // k = 1/Q; <0 = self-osc (midrange only)
+        k = std::max(-0.2, 2.0 * (1.0 - 1.1 * r)); // k = 1/Q; <0 = self-osc
 
-        // In-core distortion: lower state ceiling = more crunch.
-        lim    = 3.0 / (1.0 + 7.0 * drive * drive);
-        fold   = std::clamp((drive - 0.6) / 0.4, 0.0, 1.0); // folding/rustle at top
-        bias   = 0.15 * drive;                               // asymmetry -> even harmonics
-        inGain = 1.0 + 1.5 * drive;
+        // In-core distortion: lower state ceiling = more crunch. The ceiling
+        // grows with resonance and the input is turned down as resonance rises,
+        // so the resonant ring has room to swing instead of being clipped away
+        // (that's what made the filter sound bland next to a hot synth).
+        lim    = 3.0 / (1.0 + 10.0 * drive * drive) * (1.0 + 3.0 * res);
+        fold   = std::clamp((drive - 0.4) / 0.6, 0.0, 1.0); // folding/rustle from 0.4 up
+        bias   = 0.2 * drive;                                // asymmetry -> even harmonics
+        const double inScale = 1.0 - 0.7 * std::pow(res, 1.5);
+        inGain = (1.0 + 2.5 * drive) * inScale;
+        // make-up gain: roughly undoes the ceiling and the input turn-down, so
+        // Drive is heard as character rather than as a level drop
+        // and the strong resonance is tamed so it sings without jumping in level
+        outComp = std::pow(1.0 + 10.0 * drive * drive, 0.3) / std::pow(1.0 + 2.5 * drive, 0.25)
+                / (1.0 + 6.0 * res * res * res);
     }
+
+    static double ceil3(double y) { return y / std::sqrt(1.0 + (y * y) / 9.0); }
 
     // State shaper: tanh-ish clip that morphs into a sine fold.
     double shape(double u) const
@@ -198,8 +211,9 @@ private:
         lp = v2 + s2;
         s2 = shape(lp + v2);
 
-        const double out = 1.0 / std::sqrt(inGain);
-        lp *= out; bp *= out; hp *= out;
+        // light level compensation only, so turning Drive up is clearly audible;
+        // a soft ceiling (~±3) keeps the strong resonance's transients bounded
+        lp = ceil3(lp * outComp); bp = ceil3(bp * outComp); hp = ceil3(hp * outComp);
     }
 };
 
@@ -213,7 +227,7 @@ public:
         fs2 = (os ? 2.0 : 1.0) * sampleRate;
         dc.prepare(sampleRate); reset(); updateCoeffs();
     }
-    void reset() { s.fill(0.0); osIn.reset(); osOut.reset(); }
+    void reset() { s.fill(0.0); bassLp = 0.0; osIn.reset(); osOut.reset(); }
     int  latencySamples() const { return os ? Oversampler2x::latency() : 0; }
 
     void setCutoff(double hz)     { cutoff = hz; updateCoeffs(); }
@@ -239,7 +253,7 @@ public:
 private:
     bool os = true;
     double fs2 = 96000.0, cutoff = 1000.0, res = 0.3, gain01 = 0.5;
-    double k = 0.0, inGain = 1.0, outGain = 1.0;
+    double k = 0.0, inGain = 1.0, outGain = 1.0, bassMakeup = 0.35, bassReturn = 0.0, bassA = 0.01, bassLp = 0.0, resKnee = 1.0;
     std::array<double, 4> G{}, s{};
     // Per-pole mismatch: each pole is its own little circuit.
     static constexpr std::array<double, 4> detune { 1.000, 1.013, 0.988, 1.006 };
@@ -255,9 +269,22 @@ private:
             const double g = std::tan(kPi * fc / fs2);
             G[i] = g / (1.0 + g);
         }
-        k = 4.25 * res;                                    // ~4 = self-oscillation
-        inGain  = 0.25 * std::pow(24.0, gain01);           // 0.25x ... 6x
-        outGain = 1.0 / std::pow(inGain, 0.75);
+        // Resonance curve: more happens in the upper half of the knob.
+        // ~4 = self-oscillation, max 5.6 = strong, singing self-oscillation.
+        // (Kulmahiomakone 26.11.2026: boosted from max 4.25.)
+        k = 6.5 * std::pow(res, 1.25);
+        // 0.25x ... 6x; at high resonance + high gain the input is eased back a
+        // little so the resonance isn't choked by the saturated poles
+        inGain  = 0.25 * std::pow(24.0, gain01) * (1.0 - 0.75 * std::pow(res, 1.5) * gain01);
+        // level compensation: input gain, and the louder self-oscillation
+        outGain = 1.0 / std::pow(inGain, 0.75) / (1.0 + 0.25 * std::max(0.0, k - 3.0) * (1.0 - 0.7 * gain01));
+        bassMakeup = 0.35;
+        resKnee = std::max(1.0, inGain);
+        // bass return: like the real module (demo video, 100 % reso + 100 % gain)
+        // the bass stays strong under the singing peak. Done in parallel (not by
+        // pushing more input into the loop, which would choke the resonance).
+        bassReturn = 0.9 * std::clamp((res - 0.3) / 0.7, 0.0, 1.0);
+        bassA = 1.0 - std::exp(-2.0 * kPi * std::min(150.0, cutoff * 0.5) / fs2);
     }
 
     // Diode-pair control element: softer, rounder knee than tanh.
@@ -268,13 +295,18 @@ private:
     }
 
     // Soft-clipping diodes in the resonance loop (antiparallel pair).
-    static double resClip(double y)
+    // Knee raised and softened (was 0.6 / 2.5) so the resonant peak isn't
+    // flattened before it can be heard.
+    // The knee follows the input gain, so the resonance keeps up with a hot
+    // input instead of drowning under it (demo video: 100 % gain + 100 % reso
+    // still sings loudly).
+    double resClip(double y) const
     {
-        const double t = 0.6;
+        const double t = resKnee;
         const double ay = std::abs(y);
         if (ay <= t) return y;
         const double over = ay - t;
-        return std::copysign(t + over / (1.0 + 2.5 * over), y);
+        return std::copysign(t + over / (1.0 + 1.5 * over), y);
     }
 
     double tick(double x)
@@ -291,7 +323,7 @@ private:
 
         // Resonance feedback through clipping diodes, with a little bass
         // make-up so it stays chunky ("woolly") rather than thin.
-        double u = x * (1.0 + 0.35 * k) - k * resClip(y4est);
+        double u = x * (1.0 + bassMakeup * k) - k * resClip(y4est);
         u = diode(u, 3.0);   // op-amp headroom: keeps the core bounded
 
         for (int i = 0; i < 4; ++i)
@@ -305,7 +337,9 @@ private:
         }
         // Hot signals push the output buffer into its own (slightly
         // asymmetric) diode knee after the poles — that's the bite.
-        const double y = diode(u + 0.08, 0.9) - diode(0.08, 0.9);
+        double y = diode(u + 0.08, 0.9) - diode(0.08, 0.9);
+        bassLp += bassA * (x - bassLp);
+        y += bassReturn * diode(bassLp, 0.9);
         return y * outGain * 1.15;
     }
 };
