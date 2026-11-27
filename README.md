@@ -1,20 +1,26 @@
 # Filtteri
 
-Kolme luonteikasta suodatinta VST-syntikoihin (esim. Kulmahiomakone).
+Neljä luonteikasta suodatinta VST-syntikoihin (esim. Kulmahiomakone).
 Header-only C++17, ei JUCE-riippuvuutta: `include/`.
 
 | Luokka | Esikuva | Luonne |
 |---|---|---|
 | `kh::KatkarapuFilter` | Crazy Chicken **Shrimpy** | Multimode SVF (LP/BP/HP yhtä aikaa), resonanssi painottuu kevyesti keskitaajuuksille ja itseoskilloi koko alueella, särö suodattimen *sisällä*; Driven yläpäässä (yli ~0.4) taittuva, rahiseva reuna |
 | `kh::VillapaitaFilter` | Dwyfor Tech **Pas-Isel** | 4-napainen alipäästö, jokaisella navalla oma diodimainen epälineaarisuus ja pieni virityspoikkeama, soft-clip-diodit resonanssisilmukassa (Korg MS -tyyliin); pieni tulovahvistus = siisti, iso = pureva (herää noin 0.75:stä). Basso säilyy resonanssin alla ja resonanssi laulaa myös täydellä vahvistuksella |
+| `kh::KumiankkaFilter` | Roland **TB-303** | Diodiporras: neljä toisiaan kuormittavaa napaa (ei puskureita), pyöreä ja kumimainen leikkaus. Basso ohenee resonanssin noustessa, resonanssi soi pitkään mutta ei itseoskilloi, ja matalilla cutoffeilla se on heikompi. Drive (ei 303:ssa) kuumentaa diodeja |
 | `kh::AvaruusradioFilter` | "Avaruusradio" (Paratek, Oxymoron) | Formanttisuodatin (suomen vokaalit a–ä–e–i–y–ö–o–u), satunnainen tavu-/sanagenerointi "mutinaksi" ja huonosti kuuluva radio: SSB-virityksen ryömintä, kaistanrajaus, häipymät, rätinä, vihellys |
 
 `AvaruusradioFilter` on omassa headerissaan: `include/AvaruusradioFilter.h`.
 
 Shrimpy- ja Pas-Isel-moduleista ei ole julkista kytkentäkaaviota, joten nämä ovat
-valmistajien kuvauksiin perustuvia luonnemalleja, eivät piiriemulaatioita.
+valmistajien kuvauksiin perustuvia luonnemalleja, eivät piiriemulaatioita. Myös Kumiankka on
+luonnemalli (kytketty diodiporras), ei 303:n piiriemulaatio.
 
-Molemmat ajetaan sisäisesti 2× ylinäytteistettynä. Viive: `latencySamples()` (15 näytettä).
+**Villapaidan acid-tila** (`setAcid(0..1)`): 0 = Pas-Isel-luonne bittitarkasti ennallaan,
+1 = 303-henkinen: basso ohenee resolla, resonanssi jää juuri itseoskilloinnin alle ja yksi
+napa laskee muita alemmas (loivempi, pyöreämpi leikkaus). Väliarvot liukuvat.
+
+Katkarapu, Villapaita ja Kumiankka ajetaan sisäisesti 2× ylinäytteistettynä. Viive: `latencySamples()` (15 näytettä).
 
 ## Käyttö
 
@@ -33,7 +39,13 @@ vil.prepare(sampleRate);
 vil.setCutoff(800.0);
 vil.setResonance(0.8);   // 0..1 (~0.7+ itseoskilloi)
 vil.setInputGain(0.5);   // 0 = kohtelias, 0.5 ≈ yksikkövahvistus, 1 = pureva
+vil.setAcid(1.0);        // 0 = Pas-Isel, 1 = 303-henkinen
 float y = vil.process(x);
+
+kh::KumiankkaFilter kum;
+kum.prepare(sampleRate);
+kum.set(800.0, 0.85, 0.0); // cutoff Hz, reso 0..1 (ei itseoskilloi), drive 0..1
+float z = kum.process(x);
 ```
 
 ```cpp
@@ -51,13 +63,19 @@ float y = radio.process(x); // syötä jotain surisevaa: saha, pulssi, kohina
 ```
 
 Jos isäntäkoodi pyörii jo ylinäytteistettynä (esim. Kulmahiomakone 4x), ohita
-suotimien oma ylinäytteistys: `kat.prepare(fs, false)` / `vil.prepare(fs, false)`.
+suotimien oma ylinäytteistys: `kat.prepare(fs, false)` / `vil.prepare(fs, false)` / `kum.prepare(fs, false)`.
 Silloin viivettä ei ole. `set(cutoff, reso, drive)` päivittää kaiken yhdellä
 kerroinlaskulla.
 
 Setterit laskevat kertoimet (sisältää `tan`-kutsuja), joten kutsu niitä
 blokin välein tai esim. joka 16. näyte, ja silota parametrit itse.
 Yksi instanssi per ääni (polyfonisessa syntikassa).
+
+## Muutokset 27.11.2026
+
+- Uusi **Kumiankka** (303-tyyppinen diodiporras) ja testi `tests/kumiankka_test.cpp`.
+- **Villapaita:** `setAcid()`. Oletus 0 tuottaa täsmälleen saman äänen kuin ennen.
+- Uusi demolinja `acidLine` (aksentit, slidet, kasautuva accent sweep) ja näytteet `00_dry_acidline`, `u*`, `v08`, `v09`.
 
 ## Muutokset 26.11.2026 (Kulmahiomakoneen kanssa yhteiset)
 
@@ -97,6 +115,21 @@ Kaikki on normalisoitu –2 dBFS:n huippuun, joten äänenvoimakkuudet eivät ol
 | `v05_self_oscillation.mp3` | Ei tuloa, itseoskillointi, cutoff liukuu kuin siniosk. |
 | `v06_pad.mp3` | Molli-padi, hidas sweep |
 | `v07_percussion.mp3` | Kohinapurskeet, korkea resonanssi |
+| `v08_acidline_acid0.mp3` | Acid-linja Villapaidan läpi, acid 0 |
+| `v09_acidline_acid1.mp3` | Sama, acid 1 |
+
+### Kumiankka
+
+Acid-linja: 138 BPM, aksentit ja slidet, accent sweep kasautuu peräkkäisillä aksenteilla.
+
+| Tiedosto | Mitä |
+|---|---|
+| `00_dry_acidline.mp3` | Suodattamaton acid-linja (vertailu) |
+| `u01_acid_mid.mp3` | Reso 0.6 |
+| `u02_acid_squelch.mp3` | Reso 0.9 |
+| `u03_acid_hot.mp3` | Reso 0.9, drive 0.8 |
+| `u04_goabass.mp3` | Goa-bassolinja, reso 0.75 |
+| `u05_pad.mp3` | Molli-padi, hidas sweep |
 
 ### Avaruusradio
 
@@ -118,6 +151,7 @@ Kaikki on normalisoitu –2 dBFS:n huippuun, joten äänenvoimakkuudet eivät ol
 # testit (vakaus, taajuusvaste, itseoskillointi)
 g++ -std=c++17 -O2 -Iinclude tests/stability_test.cpp -o stability_test && ./stability_test
 g++ -std=c++17 -O2 -Iinclude tests/avaruusradio_test.cpp -o avaruusradio_test && ./avaruusradio_test
+g++ -std=c++17 -O2 -Iinclude tests/kumiankka_test.cpp -o kumiankka_test && ./kumiankka_test
 
 # näytteiden renderöinti (WAV)
 g++ -std=c++17 -O2 -Iinclude demos/render_demos.cpp -o render_demos && ./render_demos samples
@@ -125,5 +159,5 @@ g++ -std=c++17 -O2 -Iinclude demos/render_demos.cpp -o render_demos && ./render_
 
 ## Ideoita myöhemmäksi
 
-- Lo-fi-säätimet Katkarapuun ja Villapaitaan
+- Lo-fi-säätimet Katkarapuun, Villapaitaan ja Kumiankkaan
 - Säädin, josta kuulee digitaalisen aliasoinnin

@@ -239,6 +239,11 @@ public:
         cutoff = hz; res = std::clamp(r, 0.0, 1.0); gain01 = std::clamp(g01, 0.0, 1.0);
         updateCoeffs();
     }
+    // Acid (Happo) 0..1: 0 = Pas-Isel-luonne (ennallaan), 1 = 303-henkinen:
+    // basso ohenee resonanssin noustessa, resonanssi jää juuri itseoskilloinnin
+    // alle (kumimainen, märkä), ja yksi napa on selvästi muita matalammalla
+    // (303:n poikkeava alin kondensaattori -> loivempi, pyöreämpi leikkaus).
+    void setAcid(double a)        { acid = std::clamp(a, 0.0, 1.0); updateCoeffs(); }
 
     float process(float in)
     {
@@ -252,7 +257,7 @@ public:
 
 private:
     bool os = true;
-    double fs2 = 96000.0, cutoff = 1000.0, res = 0.3, gain01 = 0.5;
+    double fs2 = 96000.0, cutoff = 1000.0, res = 0.3, gain01 = 0.5, acid = 0.0;
     double k = 0.0, inGain = 1.0, outGain = 1.0, bassMakeup = 0.35, bassReturn = 0.0, bassA = 0.01, bassLp = 0.0, resKnee = 1.0;
     std::array<double, 4> G{}, s{};
     // Per-pole mismatch: each pole is its own little circuit.
@@ -265,25 +270,29 @@ private:
     {
         for (int i = 0; i < 4; ++i)
         {
-            const double fc = std::clamp(cutoff * detune[i], 10.0, 0.45 * fs2);
+            // acid: alin napa siirtyy alemmas (303:n isompi pohjakondensaattori)
+            const double dt = (i == 0) ? detune[0] + (0.72 - detune[0]) * acid : detune[i];
+            const double fc = std::clamp(cutoff * dt, 10.0, 0.45 * fs2);
             const double g = std::tan(kPi * fc / fs2);
             G[i] = g / (1.0 + g);
         }
         // Resonance curve: more happens in the upper half of the knob.
-        // ~4 = self-oscillation, max 5.6 = strong, singing self-oscillation.
+        // ~4 = self-oscillation, max 6.5 = strong, singing self-oscillation.
         // (Kulmahiomakone 26.11.2026: boosted from max 4.25.)
         k = 6.5 * std::pow(res, 1.25);
+        // acid: maksimi jää itseoskilloinnin (~4) alle -> soi, mutta sammuu
+        k += (4.0 * std::pow(res, 1.1) - k) * acid;
         // 0.25x ... 6x; at high resonance + high gain the input is eased back a
         // little so the resonance isn't choked by the saturated poles
         inGain  = 0.25 * std::pow(24.0, gain01) * (1.0 - 0.75 * std::pow(res, 1.5) * gain01);
         // level compensation: input gain, and the louder self-oscillation
         outGain = 1.0 / std::pow(inGain, 0.75) / (1.0 + 0.25 * std::max(0.0, k - 3.0) * (1.0 - 0.7 * gain01));
-        bassMakeup = 0.35;
+        bassMakeup = 0.35 * (1.0 - acid);
         resKnee = std::max(1.0, inGain);
         // bass return: like the real module (demo video, 100 % reso + 100 % gain)
         // the bass stays strong under the singing peak. Done in parallel (not by
         // pushing more input into the loop, which would choke the resonance).
-        bassReturn = 0.9 * std::clamp((res - 0.3) / 0.7, 0.0, 1.0);
+        bassReturn = 0.9 * std::clamp((res - 0.3) / 0.7, 0.0, 1.0) * (1.0 - acid);
         bassA = 1.0 - std::exp(-2.0 * kPi * std::min(150.0, cutoff * 0.5) / fs2);
     }
 
@@ -341,6 +350,147 @@ private:
         bassLp += bassA * (x - bassLp);
         y += bassReturn * diode(bassLp, 0.9);
         return y * outGain * 1.15;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// KumiankkaFilter — TB-303-tyyppinen diodiporras ("kumiankka": kumimainen,
+// märkä squelch). Neljä kytkettyä napaa, jotka kuormittavat toisiaan
+// (ei puskureita kuten Villapaidassa), alin aste painavampi. Seuraukset:
+//   * loivempi ja pyöreämpi leikkaus kuin puskuroidussa 24 dB:n portaassa
+//   * basso ohenee resonanssin noustessa (osittain kompensoitu, ei kokonaan)
+//   * resonanssi jää itseoskilloinnin alle: soi pitkään mutta sammuu
+//   * pehmeä diodisaturaatio takaisinkytkennän summauspisteessä
+// Lineaarinen osa ratkaistaan tarkasti (ZDF, trapetsi-integraattorit, 4x4).
+// Cutoff on kalibroitu niin, että resonanssipiikki osuu annettuun taajuuteen.
+// Luonnemalli, ei piiriemulaatio.
+class KumiankkaFilter
+{
+public:
+    void prepare(double sampleRate, bool oversample = true)
+    {
+        os = oversample;
+        fs2 = (os ? 2.0 : 1.0) * sampleRate;
+        dc.prepare(sampleRate); reset(); updateCoeffs();
+    }
+    void reset() { s.fill(0.0); osIn.reset(); osOut.reset(); }
+    int  latencySamples() const { return os ? Oversampler2x::latency() : 0; }
+
+    void setCutoff(double hz)    { cutoff = hz; updateCoeffs(); }
+    void setResonance(double r)  { res = std::clamp(r, 0.0, 1.0); updateCoeffs(); }
+    // 0 = puhdas, 1 = kuuma tulo diodeille (ei 303:ssa, mutta hyödyllinen)
+    void setDrive(double d)      { drive = std::clamp(d, 0.0, 1.0); updateCoeffs(); }
+    void set(double hz, double r, double d)
+    {
+        cutoff = hz; res = std::clamp(r, 0.0, 1.0); drive = std::clamp(d, 0.0, 1.0);
+        updateCoeffs();
+    }
+
+    float process(float in)
+    {
+        if (!os) return (float)dc.process(tick(in));
+        double a, b;
+        osIn.upsample(in, a, b);
+        const double ya = tick(a);
+        const double yb = tick(b);
+        return (float)dc.process(osOut.downsample(ya, yb));
+    }
+
+private:
+    bool os = true;
+    double fs2 = 96000.0, cutoff = 1000.0, res = 0.3, drive = 0.0;
+    double g = 0.1, k = 0.0, inGain = 1.0, satL = 1.0, outGain = 1.0;
+    std::array<double, 4> s{};
+    double P[4][4] {};          // (I - gM)^-1   (ladder with u known)
+    double pr[4] {}, pc = 0.0;  // y4 prediction with linear feedback
+    Oversampler2x osIn, osOut;
+    DcBlock dc;
+
+    // Kytkentämatriisi: f = M y + b u, b = (1,0,0,0)
+    static constexpr double M[4][4] = { { -2.0,  1.0,  0.0,  0.0 },
+                                        {  0.5, -1.0,  0.5,  0.0 },
+                                        {  0.0,  0.5, -1.0,  0.5 },
+                                        {  0.0,  0.0,  0.5, -0.5 } };
+    static constexpr double kCrit = 21.6;     // itseoskilloinnin raja (mitattu)
+
+    static bool invert4(double A[4][4], double R[4][4])
+    {
+        double a[4][8];
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 8; ++j)
+                a[i][j] = j < 4 ? A[i][j] : (j - 4 == i ? 1.0 : 0.0);
+        for (int c = 0; c < 4; ++c)
+        {
+            int p = c;
+            for (int r = c + 1; r < 4; ++r) if (std::abs(a[r][c]) > std::abs(a[p][c])) p = r;
+            if (std::abs(a[p][c]) < 1e-15) return false;
+            if (p != c) for (int j = 0; j < 8; ++j) std::swap(a[p][j], a[c][j]);
+            const double d = 1.0 / a[c][c];
+            for (int j = 0; j < 8; ++j) a[c][j] *= d;
+            for (int r = 0; r < 4; ++r)
+                if (r != c && a[r][c] != 0.0)
+                {
+                    const double f = a[r][c];
+                    for (int j = 0; j < 8; ++j) a[r][j] -= f * a[c][j];
+                }
+        }
+        for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) R[i][j] = a[i][j + 4];
+        return true;
+    }
+
+    void updateCoeffs()
+    {
+        // Resonanssi: suurin osa liikkeestä nupin yläpuoliskolla; matalilla
+        // cutoffeilla heikompi (kuten 303:ssa, jossa matala pää ei juuri ulvo).
+        const double lowTaper = 0.75 + 0.25 * std::clamp(std::log2(cutoff / 60.0) / 2.5, 0.0, 1.0);
+        k = 0.98 * kCrit * std::pow(res, 1.6) * lowTaper;
+
+        // Kytketyn portaan kulmataajuus nousee resonanssin mukana. Kalibrointi:
+        // suurella resolla piikki osuu cutoffiin, pienellä resolla suodin on
+        // hieman annettua tummempi (kuten diodiportaissa yleensä).
+        const double ratio = 0.3 + 0.42 * (1.0 - std::exp(-k / 7.0));
+        const double fc = std::clamp(cutoff / ratio, 10.0, 0.45 * fs2);
+        g = std::tan(kPi * fc / fs2);
+
+        inGain  = 1.0 + 3.0 * drive * drive;
+        satL    = 1.6 / (1.0 + 1.5 * drive);
+        // basso ohenee resolla: DC-vahvistus on 1/(1+k), palautetaan vain osa
+        outGain = std::pow(1.0 + k, 0.55) / std::pow(inGain, 0.6) * 1.1;
+
+        double A[4][4], F[4][4];
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+            {
+                A[i][j] = (i == j ? 1.0 : 0.0) - g * M[i][j];
+                F[i][j] = A[i][j];
+            }
+        invert4(A, P);
+        // ennuste: lineaarinen takaisinkytkentä mukana
+        F[0][3] += g * k;
+        double Fi[4][4];
+        invert4(F, Fi);
+        for (int j = 0; j < 4; ++j) pr[j] = Fi[3][j];
+        pc = Fi[3][0] * g;
+    }
+
+    double sat(double v) const
+    {
+        // diodipari, hieman epäsymmetrinen (parilliset yläsävelet)
+        const double x = v / satL;
+        return satL * (std::tanh(x + 0.1) - std::tanh(0.1)) / (1.0 - std::tanh(0.1) * std::tanh(0.1));
+    }
+
+    double tick(double x)
+    {
+        x *= inGain;
+        const double y4est = pr[0] * s[0] + pr[1] * s[1] + pr[2] * s[2] + pr[3] * s[3] + pc * x;
+        const double u = sat(x - k * y4est);
+        const double r0 = s[0] + g * u;
+        double y[4];
+        for (int i = 0; i < 4; ++i)
+            y[i] = P[i][0] * r0 + P[i][1] * s[1] + P[i][2] * s[2] + P[i][3] * s[3];
+        for (int i = 0; i < 4; ++i) s[i] = 2.0 * y[i] - s[i];
+        return y[3] * outGain;
     }
 };
 

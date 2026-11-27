@@ -62,6 +62,39 @@ static Buf goaBass(Proc p, double seconds = 6.0, double baseCut = 150, double en
     return out;
 }
 
+// 303-tyylinen acid-linja: 16 askelta, aksentit ja slidet. Aksentti = kovempi
+// ja lyhyempi, korkeampi suodinpyyhkäisy, joka kasautuu peräkkäisillä
+// aksenteilla (accent sweep). Slide = gate auki seuraavaan + sävelliuku.
+static Buf acidLine(Proc p, double seconds = 8.0, double baseCut = 180, double envOct = 3.0)
+{
+    const int    note[16]   = { 0, 12, 0, 3, 0, 15, 12, 0, 7, 0, 10, 12, 0, 3, 5, 0 };
+    const bool   acc[16]    = { 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0 };
+    const bool   slide[16]  = { 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0 };
+    const double step = 60.0 / 138.0 / 4.0;
+    Saw saw; Buf out; double pitch = note[0], env = 0, accCap = 0;
+    int last = -1;
+    for (int i = 0; i < (int)(seconds * FS); ++i) {
+        double t = i / FS; int st = (int)(t / step); double tin = t - st * step; int s16 = st % 16;
+        if (st != last) {
+            const bool tied = slide[(st + 15) % 16];
+            if (!tied) env = 1.0;
+            if (acc[s16]) accCap += 0.5 * (1.0 - accCap);
+            last = st;
+        }
+        pitch += (note[s16] - pitch) * (slide[(st + 15) % 16] ? 0.0012 : 1.0);
+        saw.setFreq(43.65 * std::pow(2.0, pitch / 12.0));
+        const double dec = acc[s16] ? 0.2 : 0.5;
+        env *= std::exp(-1.0 / (dec * 0.25 * FS));
+        accCap *= std::exp(-1.0 / (0.35 * FS));
+        const bool gate = tin < step * 0.6 || slide[s16];
+        const double amp = gate ? (acc[s16] ? 1.0 : 0.65) : 0.0;
+        const double sweep = 0.5 - 0.5 * std::cos(2 * kh::kPi * t / seconds);
+        const double cut = baseCut * std::pow(2.0, 2.5 * sweep + envOct * env + (acc[s16] ? 1.8 * accCap : 0.0));
+        out.push_back(p((float)(0.5 * amp * saw.next()), cut, t));
+    }
+    return out;
+}
+
 // Slow pad: detuned saws playing a minor chord, cutoff sweeps slowly.
 static Buf pad(Proc p, double seconds = 8.0)
 {
@@ -130,8 +163,34 @@ int main(int argc, char** argv)
             return f->process(x); });
     };
 
+    auto kum = [](double res, double drv) {
+        auto f = std::make_shared<kh::KumiankkaFilter>(); f->prepare(FS); f->setResonance(res); f->setDrive(drv);
+        auto n = std::make_shared<int>(0);
+        return Proc([=](float x, double c, double) {
+            if (((*n)++ & 15) == 0) f->setCutoff(c);
+            return f->process(x); });
+    };
+    auto vilAcid = [](double res, double g, double acid) {
+        auto f = std::make_shared<kh::VillapaitaFilter>(); f->prepare(FS); f->setResonance(res); f->setInputGain(g); f->setAcid(acid);
+        auto n = std::make_shared<int>(0);
+        return Proc([=](float x, double c, double) {
+            if (((*n)++ & 15) == 0) f->setCutoff(c);
+            return f->process(x); });
+    };
+
     // Reference
     writeWav(dir + "00_dry_bassline.wav", goaBass([](float x, double, double) { return x; }));
+    writeWav(dir + "00_dry_acidline.wav", acidLine([](float x, double, double) { return x; }));
+
+    // Kumiankka (303-tyyppinen diodiporras)
+    writeWav(dir + "u01_acid_mid.wav",     acidLine(kum(0.6, 0.0)));
+    writeWav(dir + "u02_acid_squelch.wav", acidLine(kum(0.9, 0.0)));
+    writeWav(dir + "u03_acid_hot.wav",     acidLine(kum(0.9, 0.8)));
+    writeWav(dir + "u04_goabass.wav",      goaBass(kum(0.75, 0.2)));
+    writeWav(dir + "u05_pad.wav",          pad(kum(0.8, 0.1)));
+    // Villapaita: sama acid-linja, acid pois / päällä
+    writeWav(dir + "v08_acidline_acid0.wav", acidLine(vilAcid(0.85, 0.5, 0.0)));
+    writeWav(dir + "v09_acidline_acid1.wav", acidLine(vilAcid(0.9, 0.5, 1.0)));
 
     // Katkarapu
     writeWav(dir + "k01_lp_clean.wav",   goaBass(kat(0.6, 0.1, 0)));
